@@ -1,65 +1,194 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useState, useMemo } from "react";
+import useSWRMutation from "swr/mutation";
+
+import { CashRegisterEditor } from "./components/CashRegisterEditor";
+import { AlgorithmInputForm } from "./components/AlgorithmInputForm";
+import { ProductGrid } from "./components/ProductGrid";
+import { SelectedProductInfo } from "./components/SelectProductInfo";
+import { MachineStatePanel } from "./components/MachineStatePanel";
+import { ChangeResult } from "./components/ChangeResult";
+
+import { products as initialProducts } from "./data/products";
+import { exportData } from "./lib/export";
+import { importData } from "./lib/import";
+import { roundToNearest5 } from "./lib/validation";
+
+import type { Product, CoinInput, ChangeRequest, ChangeResponse } from "./lib/types";
+
+async function postChange(url: string, { arg }: { arg: ChangeRequest }) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(arg)
+  });
+  return (await res.json()) as ChangeResponse;
+}
+
+const DEFAULT_REGISTER: CoinInput[] = [
+  { denom: 5, count: 20 },
+  { denom: 10, count: 40 },
+  { denom: 20, count: 3 },
+  { denom: 50, count: 5 },
+  { denom: 100, count: 30 },
+  { denom: 200, count: 20 },
+  { denom: 500, count: 6 },
+  { denom: 1000, count: 10 },
+  { denom: 2000, count: 10 },
+  { denom: 5000, count: 10 }
+];
+
+export default function Page() {
+  const [rows, setRows] = useState<CoinInput[]>(DEFAULT_REGISTER);
+  const [products, setProducts] = useState<Product[]>(initialProducts);
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [paymentAmount, setPaymentAmount] = useState<number>(850);
+  const [result, setResult] = useState<ChangeResponse | null>(null);
+  const [dispensing, setDispensing] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const totalBalance = useMemo(
+    () => rows.reduce((sum, r) => sum + r.denom * r.count, 0),
+    [rows]
+  );
+
+  const { trigger, isMutating } = useSWRMutation("/api/change", postChange);
+
+  const handleRun = async () => {
+    setErrorMessage(null);
+    setResult(null);
+    setDispensing(false);
+
+    if (!selectedProduct) return setErrorMessage("Please select a product.");
+    if (selectedProduct.stock <= 0) return setErrorMessage("Product out of stock.");
+    if (paymentAmount <= selectedProduct.price)
+      return setErrorMessage("Payment must exceed product price.");
+
+    const changeToGive = paymentAmount - selectedProduct.price;
+    const roundedChange = roundToNearest5(changeToGive);
+
+    if (totalBalance < roundedChange)
+      return setErrorMessage(
+        `Machine has insufficient balance ($${(totalBalance / 100).toFixed(2)})`
+      );
+
+    const sanitizedRows = rows.filter((r) => r.denom > 0 && r.count > 0);
+
+    const response = await trigger({
+      cashRegister: sanitizedRows,
+      paymentAmount: roundedChange
+    });
+
+    if (!response.success) {
+      setErrorMessage(response.message ?? "Unable to compute change.");
+      return;
+    }
+
+    // update register
+    if (response.updatedRegister) {
+      setRows(response.updatedRegister);
+      localStorage.setItem("register", JSON.stringify(response.updatedRegister));
+    }
+
+    // update product stock
+    setProducts((prev) =>
+      prev.map((p) =>
+        p.id === selectedProduct.id ? { ...p, stock: p.stock - 1 } : p
+      )
+    );
+
+    setDispensing(true);
+    setTimeout(() => setDispensing(false), 1500);
+
+    setResult(response);
+  };
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <main className="mx-auto max-w-5xl px-4 py-8">
+      <header className="mb-8">
+        <h1 className="text-3xl font-semibold tracking-tight">
+          Smart Vending Machine Simulator
+        </h1>
+        <p className="mt-2 text-sm text-slate-400 max-w-2xl">
+          Configure a cash register, purchase items, apply Australian rounding
+          rules, compute optimal change, and import/export machine state.
+        </p>
+      </header>
+
+      <section className="grid gap-6 md:grid-cols-[1.2fr_1fr] mb-6">
+        <CashRegisterEditor
+          rows={rows}
+          onChangeRow={(i, f, v) =>
+            setRows((r) => r.map((row, idx) => (idx === i ? { ...row, [f]: v } : row)))
+          }
+          onAddRow={() => setRows([...rows, { denom: 0, count: 0 }])}
+          onRemoveRow={(i) => setRows(rows.filter((_, idx) => idx !== i))}
+          totalBalance={totalBalance}
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
+
+        <MachineStatePanel
+          rows={rows}
+          products={products}
+          onImport={(state) => {
+            setRows(state.register);
+            setProducts(state.products);
+            setSelectedProduct(null);
+          }}
+        />
+
+        <ProductGrid
+          products={products}
+          selected={selectedProduct}
+          onSelect={setSelectedProduct}
+        />
+
+        <SelectedProductInfo
+          product={selectedProduct}
+          paymentAmount={paymentAmount}
+        />
+
+        <AlgorithmInputForm
+          paymentAmount={paymentAmount}
+          onChangePaymentAmount={setPaymentAmount}
+          onSubmit={handleRun}
+          onReset={() => setResult(null)}
+          disabled={isMutating}
+          isLoading={isMutating}
+        />
+
+        {errorMessage && (
+          <div className="rounded-xl border border-red-500/70 bg-red-950/40 p-3 text-xs text-red-100">
+            <strong className="block mb-1">Input error</strong>
+            {errorMessage}
+          </div>
+        )}
+      </section>
+
+      <section>
+        {dispensing && (
+          <div className="p-3 bg-emerald-900/40 border border-emerald-500 rounded-xl animate-pulse text-emerald-200 text-sm mb-4">
+            Dispensing {selectedProduct?.name}...
+          </div>
+        )}
+
+        <ChangeResult {...result} />
+      </section>
+
+      <footer className="mt-10 border-t border-slate-800 pt-4 text-[11px] text-slate-500">
+        <p>
+          Built with Next.js and React. Change-making DP algorithm based on the
+          <a href="https://en.wikipedia.org/wiki/Change-making_problem">
+            {" "}
+            Wikipedia formulation
           </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+          .
+        </p>
+        <p>
+          Source code on 
+          <a href="github.com/arokua/abc"> GitHub</a>. Created by <a href="#">Anh Tran</a>.
+        </p>
+      </footer>
+    </main>
   );
 }
