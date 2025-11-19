@@ -172,7 +172,10 @@ export default function Page() {
           </div>
         )}
 
-        <ChangeResult {...result} />
+        {result && (
+          <ChangeResult {...result} />
+        )}
+
       </section>
 
       <footer className="mt-10 border-t border-slate-800 pt-4 text-[11px] text-slate-500">
