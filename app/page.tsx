@@ -189,7 +189,7 @@ export default function Page() {
         </p>
         <p>
           Source code on 
-          <a href="github.com/arokua/abc"> GitHub</a>. Created by <a href="#">Anh Tran</a>.
+          <a href="https://github.com/arokua/vendor-sim"> GitHub</a>. Created by <a href="#">Anh Tran</a>.
         </p>
       </footer>
     </main>
