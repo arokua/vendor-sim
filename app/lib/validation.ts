@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ChangeRequest } from "./types";
+import type { ChangeRequest,CoinInput } from "./types";
 
 export const coinSchema = z.object({
   denom: z.number().int().nonnegative(),
@@ -18,15 +18,35 @@ export const changeRequestSchema = z.object({
     .max(1_000_000, "Payment amount too large")
 });
 
-export function validateChangeRequest(json: unknown): ChangeRequest {
-  const result = changeRequestSchema.safeParse(json);
-  if (!result.success) {
-    const message =
-      result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") ||
-      "Invalid request payload";
-    throw new Error(message);
+export function validateChangeRequest(body: any): ChangeRequest {
+  if (!body || typeof body !== "object") {
+    throw new Error("Invalid request payload.");
   }
-  return result.data;
+
+  if (!Array.isArray(body.cashRegister)) {
+    throw new Error("cashRegister must be an array.");
+  }
+
+  const cashRegister = body.cashRegister
+    .map((row : CoinInput) => ({
+      denom: Number(row.denom),
+      count: Number(row.count)
+    }))
+    .filter((r:CoinInput) => Number.isFinite(r.denom) && Number.isFinite(r.count));
+
+  if (cashRegister.length === 0) {
+    throw new Error("cashRegister cannot be empty.");
+  }
+
+  const paymentAmount = Number(body.paymentAmount);
+  if (!Number.isFinite(paymentAmount) || paymentAmount < 0) {
+    throw new Error("paymentAmount must be a non-negative number.");
+  }
+
+  // pass debug flag through untouched
+  const debug = Boolean(body.debug);
+
+  return { cashRegister, paymentAmount, debug };
 }
 
 export function roundToNearest5(amount: number): number {

@@ -5,6 +5,7 @@ import useSWRMutation from "swr/mutation";
 
 import { CashRegisterEditor } from "./components/CashRegisterEditor";
 import { AlgorithmInputForm } from "./components/AlgorithmInputForm";
+import { AlgorithmDebugPanel } from "./components/AlgorithmDebugPanel";
 import { ProductGrid } from "./components/ProductGrid";
 import { SelectedProductInfo } from "./components/SelectProductInfo";
 import { MachineStatePanel } from "./components/MachineStatePanel";
@@ -40,13 +41,14 @@ const DEFAULT_REGISTER: CoinInput[] = [
 ];
 
 export default function Page() {
+  const [dispensing, setDispensing] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [debugMode, setDebugMode] = useState(false);
   const [rows, setRows] = useState<CoinInput[]>(DEFAULT_REGISTER);
   const [products, setProducts] = useState<Product[]>(initialProducts);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [paymentAmount, setPaymentAmount] = useState<number>(850);
   const [result, setResult] = useState<ChangeResponse | null>(null);
-  const [dispensing, setDispensing] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const totalBalance = useMemo(
     () => rows.reduce((sum, r) => sum + r.denom * r.count, 0),
@@ -77,7 +79,8 @@ export default function Page() {
 
     const response = await trigger({
       cashRegister: sanitizedRows,
-      paymentAmount: roundedChange
+      paymentAmount: roundedChange,
+      debug: debugMode
     });
 
     if (!response.success) {
@@ -102,6 +105,8 @@ export default function Page() {
     setTimeout(() => setDispensing(false), 1500);
 
     setResult(response);
+    console.log("Change response:", response);
+    console.log("Debug info:", response.debug);
   };
 
   return (
@@ -157,10 +162,23 @@ export default function Page() {
           isLoading={isMutating}
         />
 
+        <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+          <input
+            type="checkbox"
+            className="accent-emerald-500"
+            checked={debugMode}
+            onChange={(e) => setDebugMode(e.target.checked)}
+          />
+          <span>Show inner algorithm steps (Nerd mode)</span>
+          <span className="text-[10px] text-slate-500">
+            (Adds DP table + trace; may be truncated for large amounts.)
+          </span>
+        </label>
+
         {errorMessage && (
           <div className="rounded-xl border border-red-500/70 bg-red-950/40 p-3 text-xs text-red-100">
             <strong className="block mb-1">Input error</strong>
-            {errorMessage}
+            <span>{errorMessage}</span>
           </div>
         )}
       </section>
@@ -175,6 +193,7 @@ export default function Page() {
         {result && (
           <ChangeResult {...result} />
         )}
+        {debugMode && <AlgorithmDebugPanel debug={result?.debug} />}
 
       </section>
 

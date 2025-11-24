@@ -1,4 +1,10 @@
-import type { CoinInput } from "./types";
+// app/lib/changeMaking.ts
+import type {
+  CoinInput,
+  AlgorithmDebugInfo,
+  DpTableRow,
+  NaiveDebugSummary
+} from "./types";
 
 export interface DPResult {
   success: boolean;
@@ -6,25 +12,52 @@ export interface DPResult {
   change?: number[];
   coinUsage?: Record<number, number>;
   updatedRegister?: CoinInput[];
+  debug?: AlgorithmDebugInfo;
 }
 
+const MAX_DEBUG_AMOUNT = 500;     // maximum DP table size preview
+const MAX_TRACE_LINES = 120;      // cap trace length, prevent DOM spam
+const MAX_NAIVE_AMOUNT = 8000;    // prevent super-heavy naive recursion
+export const MAX_NAIVE_CALLS = 5000;
+
 /**
- * Bounded coin change: finds a combination of coins that exactly sums to paymentAmount,
- * using each coin at most its available count. Minimizes number of coins.
+ * True bounded coin change DP:
  *
- * Time complexity (worst-case): O(n * paymentAmount * maxCount)
+ * dp[i][a] = minimum number of coins to make amount `a`
+ *            using coins[0..i-1], each with limited count.
+ *
+ * We track parents to reconstruct which coins were actually used.
  */
 export function computeChange(
   cashRegister: CoinInput[],
-  paymentAmount: number
+  paymentAmount: number,
+  options?: { debug?: boolean }
 ): DPResult {
+  const debugEnabled = options?.debug ?? false;
+
   if (paymentAmount === 0) {
     return {
       success: true,
       message: "No change required.",
       change: [],
       coinUsage: {},
-      updatedRegister: [...cashRegister]
+      updatedRegister: cashRegister.map(c => ({ ...c })),
+      debug: debugEnabled
+        ? {
+            targetAmount: paymentAmount,
+            coinSet: cashRegister.map(c => c.denom),
+            registerSnapshot: cashRegister.map(c => ({ ...c })),
+            dpTablePreview: [],
+            trace: ["Target amount is 0 – no DP needed."],
+            naive: {
+              enabled: false,
+              amountTried: 0,
+              resultCoins: 0,
+              calls: 0,
+              truncated: false
+            }
+          }
+        : undefined
     };
   }
 
@@ -35,107 +68,255 @@ export function computeChange(
     };
   }
 
-  const coins = [...cashRegister].sort((a, b) => a.denom - b.denom);
-  const n = coins.length;
-
-  // dp[amount] = usage array or null if unreachable
-  type Usage = number[];
-
-  const dp: (Usage | null)[] = Array(paymentAmount + 1).fill(null);
-  dp[0] = Array(n).fill(0);
-  // Make sure there is enough total money
   const totalAvailable = cashRegister.reduce(
     (sum, c) => sum + c.denom * c.count,
     0
   );
-
   if (totalAvailable < paymentAmount) {
     return {
       success: false,
-      message: `The machine does not have enough money to return change. 
-  Current balance: $${(totalAvailable / 100).toFixed(2)}`
+      message: `Machine cannot provide change — insufficient total balance. Available: $${(
+        totalAvailable / 100
+      ).toFixed(2)}`
     };
   }
-  // Bounded knapsack style: for each coin type, iterate count times
-  for (let i = 0; i < n; i++) {
-    const denom = coins[i].denom;
-    const count = coins[i].count;
 
-    // If denom is 0, skip to avoid infinite loop / nonsense
-    if (denom <= 0) continue;
+  const trace: string[] = [];
+  const addTrace = (msg: string) => {
+    if (!debugEnabled) return;
+    if (trace.length < MAX_TRACE_LINES) {
+      trace.push(msg);
+    } else if (trace.length === MAX_TRACE_LINES) {
+      trace.push("… trace truncated for brevity / performance.");
+    }
+  };
 
-    // Apply coin at most 'count' times
-    for (let used = 0; used < count; used++) {
-      // Backward iteration to prevent reusing the same coin more than allowed
-      for (let amount = paymentAmount; amount >= denom; amount--) {
-        const prev = dp[amount - denom];
-        if (!prev) continue;
+  // Sort by denom ascending for nicer tables
+  const coins = [...cashRegister].sort((a, b) => a.denom - b.denom);
+  const denoms = coins.map(c => c.denom);
+  const counts = coins.map(c => c.count);
+  const n = coins.length;
 
-        const prevUsage = [...prev];
-        if (prevUsage[i] + 1 > count) continue;
+  const INF = 999999999;
 
-        const candidateUsage = [...prevUsage];
-        candidateUsage[i]++;
+  // dp[i][a] = min coins to make `a` using first i coin types (0..i-1)
+  const dp: number[][] = Array.from({ length: n + 1 }, () =>
+    Array(paymentAmount + 1).fill(INF)
+  );
 
-        const existing = dp[amount];
+  // parent[i][a] = how we got here: prev row/amount and used count of coin i-1
+  const parent: (null | { pi: number; pa: number; used: number })[][] =
+    Array.from({ length: n + 1 }, () =>
+      Array(paymentAmount + 1).fill(null)
+    );
 
-        if (!existing) {
-          dp[amount] = candidateUsage;
-        } else {
-          const existingCoins = existing.reduce((sum, c) => sum + c, 0);
-          const candidateCoins = candidateUsage.reduce((sum, c) => sum + c, 0);
-          if (candidateCoins < existingCoins) {
-            dp[amount] = candidateUsage;
-          }
+  // Base case: 0 coins, amount 0 = 0 coins used
+  dp[0][0] = 0;
+  parent[0][0] = { pi: 0, pa: 0, used: 0 };
+
+  for (let i = 1; i <= n; i++) {
+    const coin = denoms[i - 1];
+    const maxCount = counts[i - 1];
+
+    addTrace(`Processing coin ${coin}c (count=${maxCount})`);
+
+    for (let amount = 0; amount <= paymentAmount; amount++) {
+      // Option 1: don't use coin i-1 at all
+      dp[i][amount] = dp[i - 1][amount];
+      parent[i][amount] =
+        dp[i - 1][amount] < INF
+          ? { pi: i - 1, pa: amount, used: 0 }
+          : null;
+
+      // Option 2: use k copies of coin i-1 (bounded by maxCount)
+      for (let k = 1; k <= maxCount; k++) {
+        const prevAmt = amount - k * coin;
+        if (prevAmt < 0) break;
+
+        if (dp[i - 1][prevAmt] === INF) continue;
+
+        const candidate = dp[i - 1][prevAmt] + k;
+        if (candidate < dp[i][amount]) {
+          dp[i][amount] = candidate;
+          parent[i][amount] = { pi: i - 1, pa: prevAmt, used: k };
+          addTrace(
+            `amount ${amount}: using ${k} × ${coin}c (prev=${prevAmt}) → best=${candidate}`
+          );
         }
       }
     }
   }
 
-  const usage = dp[paymentAmount];
-  if (!usage) {
+  if (dp[n][paymentAmount] === INF) {
     return {
       success: false,
-      message: "Not possible to provide exact change with current coin counts."
+      message: "Exact change not possible with current coin counts.",
+      debug: debugEnabled
+        ? {
+            targetAmount: paymentAmount,
+            coinSet: denoms,
+            registerSnapshot: coins.map(c => ({ ...c })),
+            dpTablePreview: buildDpPreview(dp, denoms, paymentAmount),
+            trace,
+            naive: maybeRunNaiveDebug(denoms, paymentAmount)
+          }
+        : undefined
     };
   }
 
-  // Build response: list of coins used, usage per denom, updated register
-  const coinUsage: Record<number, number> = {};
-  const updatedRegister: CoinInput[] = coins.map((c) => ({ ...c }));
+  // ---- Backtrack to recover usage per coin type ----
+  const usage = Array(n).fill(0);
+  let i = n;
+  let amt = paymentAmount;
 
-  const change: number[] = [];
-
-  for (let i = 0; i < n; i++) {
-    const usedCount = usage[i];
-    if (usedCount <= 0) continue;
-
-    const denom = coins[i].denom;
-    coinUsage[denom] = usedCount;
-
-    if (updatedRegister[i].count < usedCount) {
-      // Defensive check (should not happen if DP is correct)
-      return {
-        success: false,
-        message: "Internal error: DP solution exceeds available coin counts."
-      };
-    }
-
-    updatedRegister[i].count -= usedCount;
-
-    for (let k = 0; k < usedCount; k++) {
-      change.push(denom);
-    }
+  while (i > 0 && amt >= 0) {
+    const p = parent[i][amt];
+    if (!p) break;
+    usage[i - 1] += p.used;
+    amt = p.pa;
+    i = p.pi;
   }
+
+  // Build updated register + change list + coinUsage map
+  const change: number[] = [];
+  const coinUsage: Record<number, number> = {};
+
+  const updatedRegister: CoinInput[] = coins.map((c, idx) => {
+    const used = usage[idx];
+    if (used > 0) {
+      coinUsage[c.denom] = used;
+      for (let k = 0; k < used; k++) {
+        change.push(c.denom);
+      }
+    }
+    return {
+      denom: c.denom,
+      count: c.count - used
+    };
+  });
 
   return {
     success: true,
     message: "Change computed successfully.",
     change,
     coinUsage,
-    updatedRegister
+    updatedRegister,
+    debug: debugEnabled
+      ? {
+          targetAmount: paymentAmount,
+          coinSet: denoms,
+          registerSnapshot: coins.map(c => ({ ...c })),
+          dpTablePreview: buildDpPreview(dp, denoms, paymentAmount),
+          trace,
+          naive: maybeRunNaiveDebug(denoms, paymentAmount)
+        }
+      : undefined
   };
 }
+
+function buildDpPreview(
+  dp: number[][],
+  denoms: number[],
+  amount: number
+): DpTableRow[] {
+  const rows: DpTableRow[] = [];
+  const maxAmount = Math.min(amount, MAX_DEBUG_AMOUNT);
+  const n = denoms.length;
+
+  for (let a = 0; a <= maxAmount; a++) {
+    const val = dp[n][a];
+    rows.push({
+      amount: a,
+      reachable: val < 999999999,
+      minCoins: val < 999999999 ? val : null,
+      lastCoin: null // could be filled by another parent-pass if you want
+    });
+  }
+
+  return rows;
+}
+
+// naive change-making for debug; heavily capped
+function maybeRunNaiveDebug(
+  denoms: number[],
+  amount: number
+): NaiveDebugSummary {
+  if (amount > MAX_NAIVE_AMOUNT) {
+    return {
+      enabled: false,
+      amountTried: amount,
+      resultCoins: null,
+      calls: 0,
+      truncated: true
+    };
+  }
+
+  let calls = 0;
+  let truncated = false;
+
+  // memo[a] = minimum number of coins to form `a`
+  const memo: Record<number, number> = {};
+
+  // parent[a] = coin denomination chosen that leads to optimal solution
+  const parent: Record<number, number | null> = {};
+
+  function solve(a: number): number {
+    calls++;
+    if (calls > MAX_NAIVE_CALLS) {
+      truncated = true;
+      return Infinity;
+    }
+
+    if (a === 0) return 0;
+    if (a < 0) return Infinity;
+
+    if (memo[a] !== undefined) return memo[a];
+
+    let best = Infinity;
+    let bestCoin: number | null = null;
+
+    for (const c of denoms) {
+      const candidate = 1 + solve(a - c);
+      if (candidate < best) {
+        best = candidate;
+        bestCoin = c;
+      }
+    }
+
+    memo[a] = best;
+    parent[a] = bestCoin;
+    return best;
+  }
+
+  const result = solve(amount);
+  const resultCoins = result === Infinity ? null : result;
+
+  // ---- Reconstruct coins used ----
+  let usedCoins: number[] = [];
+  const usageMap: Record<number, number> = {};
+
+  if (resultCoins !== null) {
+    let a = amount;
+    while (a > 0) {
+      const coin = parent[a];
+      if (!coin) break;
+      usedCoins.push(coin);
+      usageMap[coin] = (usageMap[coin] || 0) + 1;
+      a -= coin;
+    }
+  }
+
+  return {
+    enabled: true,
+    amountTried: amount,
+    resultCoins,
+    calls,
+    truncated,
+    usedCoins,
+    usageMap
+  };
+}
+
 
 /**
  * Helper for formatting cents into human-readable string.

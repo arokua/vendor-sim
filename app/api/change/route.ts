@@ -8,15 +8,19 @@ export async function POST(request: Request) {
       throw new Error("Invalid JSON payload.");
     });
 
-    const { cashRegister, paymentAmount } = validateChangeRequest(json);
+    // Extract validated fields (including debug)
+    const { cashRegister, paymentAmount, debug } = validateChangeRequest(json);
 
-    const result = computeChange(cashRegister, paymentAmount);
+    const result = computeChange(cashRegister, paymentAmount, {
+      debug: Boolean(debug)
+    });
 
     if (!result.success) {
       return NextResponse.json(
         {
           success: false,
-          message: result.message ?? "Unable to compute change."
+          message: result.message ?? "Unable to compute change.",
+          debug: result.debug ?? null
         },
         { status: 400 }
       );
@@ -28,18 +32,17 @@ export async function POST(request: Request) {
         message: result.message,
         change: result.change,
         coinUsage: result.coinUsage,
-        updatedRegister: result.updatedRegister
+        updatedRegister: result.updatedRegister,
+        debug: result.debug ?? null
       },
       { status: 200 }
     );
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "Unexpected server error.";
+
     return NextResponse.json(
-      {
-        success: false,
-        message
-      },
+      { success: false, message },
       { status: 400 }
     );
   }
